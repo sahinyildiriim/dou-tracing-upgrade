@@ -77,6 +77,8 @@ def main():
             print("Found the 'Perculus' button.")
             driver.execute_script("arguments[0].click();", perculus_button)
 
+        time.sleep(2)  # Wait for the new window to open
+
         # Find and click the cookies acceptance button
         cookies_button_xpath = wait.until(EC.presence_of_element_located((By.ID, "c-p-bn")))
         if cookies_button_xpath:
