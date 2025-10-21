@@ -4,6 +4,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from credentials import username, password, lesson, link
 import time
+import os
 
 def main():
     index = 0
@@ -94,6 +95,8 @@ def main():
                 
                 # Click the button if found
                 print("Found 'Buradayım!' button, clicking it.")
+                # Ring bell when found
+                os.system('say "sezer sezer sezer"')
                 driver.execute_script("arguments[0].click();", buradayim_button)
                 
             except Exception:
