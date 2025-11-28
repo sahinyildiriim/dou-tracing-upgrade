@@ -3,6 +3,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from credentials import username, password, lesson, link
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.action_chains import ActionChains
 import time
 import os
 
@@ -42,10 +44,80 @@ def main():
         if element:
             print("Page is loaded")
 
-        # Get input elements
-        username_input = driver.find_element(By.ID, "Username")
-        password_input = driver.find_element(By.ID, "Password")
-        login_button = driver.find_element(By.ID, "btnSubmit")
+        # Get input elements (try multiple common selectors)
+        def find_login_elements():
+            selector_candidates = [
+                (By.ID, "Username"),
+                (By.ID, "UserName"),
+                (By.NAME, "Username"),
+                (By.NAME, "UserName"),
+                (By.NAME, "Email"),
+                (By.CSS_SELECTOR, "input[type='email']"),
+                (By.CSS_SELECTOR, "input[type='text']"),
+            ]
+            password_candidates = [
+                (By.ID, "Password"),
+                (By.NAME, "Password"),
+                (By.CSS_SELECTOR, "input[type='password']"),
+            ]
+            login_button_candidates = [
+                (By.ID, "btnSubmit"),
+                (By.CSS_SELECTOR, "button[type='submit']"),
+                (By.XPATH, "//button[contains(., 'Giriş') or contains(., 'Login')]")
+            ]
+
+            username_input_el = None
+            password_input_el = None
+            login_button_el = None
+
+            # Some pages place form in an iframe – try default, then any iframe
+            def try_in_context():
+                nonlocal username_input_el, password_input_el, login_button_el
+                for by, value in selector_candidates:
+                    try:
+                        username_input_el = driver.find_element(by, value)
+                        break
+                    except Exception:
+                        continue
+                for by, value in password_candidates:
+                    try:
+                        password_input_el = driver.find_element(by, value)
+                        break
+                    except Exception:
+                        continue
+                for by, value in login_button_candidates:
+                    try:
+                        login_button_el = driver.find_element(by, value)
+                        break
+                    except Exception:
+                        continue
+
+            # Try on main document
+            try_in_context()
+            # If not found, scan iframes
+            if not (username_input_el and password_input_el and login_button_el):
+                try:
+                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                    for frame in iframes:
+                        driver.switch_to.frame(frame)
+                        try_in_context()
+                        if username_input_el and password_input_el and login_button_el:
+                            break
+                        driver.switch_to.default_content()
+                except Exception:
+                    driver.switch_to.default_content()
+
+            # Ensure we are back to a valid context
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+
+            return username_input_el, password_input_el, login_button_el
+
+        username_input, password_input, login_button = find_login_elements()
+        if not (username_input and password_input and login_button):
+            raise NoSuchElementException("Login elements not found. Please verify login page and selectors.")
 
         # Give free time to avoid detection
         time.sleep(2)
@@ -78,33 +150,138 @@ def main():
             print("Found the 'Perculus' button.")
             driver.execute_script("arguments[0].click();", perculus_button)
 
-        time.sleep(2)  # Wait for the new window to open
+        # Wait for Perculus to open in a new window/tab and switch
+        try:
+            WebDriverWait(driver, 10).until(lambda d: len(d.window_handles) >= 2)
+            driver.switch_to.window(driver.window_handles[-1])
+            print("Switched to Perculus window.")
+        except TimeoutException:
+            # If it didn't open a new window, we stay in the same one
+            print("Perculus did not open a new window; continuing in current tab.")
+        time.sleep(2)
 
-        # Find and click the cookies acceptance button
-        cookies_button_xpath = wait.until(EC.presence_of_element_located((By.ID, "c-p-bn")))
-        if cookies_button_xpath:
-            print("Found the cookies acceptance button.")
-            driver.execute_script("arguments[0].click();", cookies_button_xpath)
+        # Find and click the cookies acceptance button (best-effort)
+        try:
+            cookies_button_xpath = wait.until(EC.presence_of_element_located((By.ID, "c-p-bn")))
+            if cookies_button_xpath:
+                print("Found the cookies acceptance button.")
+                driver.execute_script("arguments[0].click();", cookies_button_xpath)
+        except TimeoutException:
+            pass
 
-        # Loop to find and click the "Buradayım!" button
+        # Check common error banner for unregistered participant
+        try:
+            error_banner = WebDriverWait(driver, 5).until(EC.presence_of_element_located((
+                By.XPATH,
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZÇĞİÖŞÜ', 'abcdefghijklmnopqrstuvwxyzçğiöşü'), 'katılımcı') and (contains(., 'kayıt') or contains(., 'kod'))] | "
+                "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'participant') and contains(., 'registered')]"
+            )))
+            if error_banner:
+                print("Perculus: Katılımcı kaydı bulunamadı. Lütfen dersi LMS içinden bir kez açın ve doğru şube/link kullandığınızdan emin olun.")
+                driver.quit()
+                return
+        except TimeoutException:
+            pass
+
+        # Helpers to locate and click "Buradayım!"
+        def find_buradayim_button():
+            xpaths = [
+                "//button[.//span[contains(normalize-space(.), 'Buradayım')]]",
+                "//button[contains(normalize-space(.), 'Buradayım')]",
+                "//*[self::span or self::div][contains(normalize-space(.), 'Buradayım')]/ancestor::button[1]",
+                "//*[contains(normalize-space(.), 'Buradayım') and (self::button or contains(@class,'button'))]",
+            ]
+
+            # Try in default content first
+            for xp in xpaths:
+                try:
+                    el = driver.find_element(By.XPATH, xp)
+                    if el:
+                        return el
+                except Exception:
+                    continue
+
+            # Scan iframes for the button
+            try:
+                frames = driver.find_elements(By.TAG_NAME, 'iframe')
+                for fr in frames:
+                    try:
+                        driver.switch_to.frame(fr)
+                        for xp in xpaths:
+                            try:
+                                el = driver.find_element(By.XPATH, xp)
+                                if el:
+                                    return el
+                            except Exception:
+                                continue
+                    finally:
+                        driver.switch_to.default_content()
+            except Exception:
+                driver.switch_to.default_content()
+
+            return None
+
+        def click_safely(el):
+            # Skip disabled buttons
+            disabled = (el.get_attribute('disabled') is not None) or (el.get_attribute('aria-disabled') in ['true', '1'])
+            if disabled:
+                return False
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+            except Exception:
+                pass
+            # Try normal click
+            try:
+                el.click()
+                return True
+            except Exception:
+                pass
+            # Try Actions click
+            try:
+                ActionChains(driver).move_to_element(el).pause(0.1).click().perform()
+                return True
+            except Exception:
+                pass
+            # Try JS click
+            try:
+                driver.execute_script("arguments[0].click();", el)
+                return True
+            except Exception:
+                return False
+
+        # Loop: watch and click "Buradayım!"
         while True:
             try:
-                # Wait for the button to be clickable
-                buradayim_button_xpath = "//span[contains(text(), 'Buradayım!')]"
-                buradayim_button = wait.until(EC.element_to_be_clickable((By.XPATH, buradayim_button_xpath)))
-                
-                # Click the button if found
-                print("Found 'Buradayım!' button, clicking it.")
-                # Ring bell when found
-                os.system('say "sezer sezer sezer"')
-                driver.execute_script("arguments[0].click();", buradayim_button)
-                
+                btn = find_buradayim_button()
+                if btn:
+                    print("Found 'Buradayım!' button, clicking it.")
+                    # Cross-platform alert
+                    try:
+                        if os.name == 'nt':
+                            import winsound
+                            winsound.MessageBeep()
+                        else:
+                            os.system("printf '\a'")
+                    except Exception:
+                        pass
+
+                    # Ensure in the context containing the element
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+
+                    if click_safely(btn):
+                        print("'Buradayım!' clicked.")
+                    else:
+                        print("'Buradayım!' click attempts failed; will retry.")
+                else:
+                    print(f"{index}: 'Buradayım!' button not found. Continuing to watch...")
+                    index += 1
             except Exception:
-                # Button not found, continue checking
-                print(f"{index}: 'Buradayım!' button not found. Continuing to watch...")
+                print(f"{index}: Error while searching/clicking 'Buradayım!'. Retrying...")
                 index += 1
 
-            # Wait for a moment before checking again
             time.sleep(5)
 
     except Exception as e:
